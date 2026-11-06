@@ -1,0 +1,27 @@
+{
+  "baselinePath": "verify-saas.baseline.json",
+  "typecheck": { "enabled": true, "command": "npx tsc --noEmit" },
+  "lint": { "enabled": true, "command": "npx eslint . --format json", "format": "eslint-json" },
+  "build": { "enabled": true, "command": "npm run build", "clean": [".next"] },
+  "tests": { "enabled": true, "command": "npx vitest run --reporter=json", "format": "vitest-json" },
+  "structure": {
+    "enabled": true,
+    "dependencyFile": "package.json",
+    "dependencyType": "package-json",
+    "migrationsDir": "supabase/migrations",
+    "migrationExtensions": [".sql"],
+    "alertKeywords": [
+      "security definer",
+      "create policy",
+      "drop policy",
+      "grant execute",
+      "enable row level security",
+      "service_role"
+    ]
+  },
+  "quick": {
+    "sourcePattern": "^(app|lib|components|src|hooks)/.*[.](ts|tsx)$",
+    "lintCommand": "npx eslint {files} --format json",
+    "testsCommand": "npx vitest related --run {files}"
+  }
+}

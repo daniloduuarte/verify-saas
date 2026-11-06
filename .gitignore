@@ -1,0 +1,6 @@
+# Baseline local de teste. No SEU projeto (quem usa a skill) o baseline deve ser commitado;
+# aqui, no repositório da skill, ele não faz sentido.
+baseline.json
+verify-saas.baseline.json
+node_modules/
+.env*

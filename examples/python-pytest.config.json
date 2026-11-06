@@ -1,0 +1,20 @@
+{
+  "baselinePath": "verify-saas.baseline.json",
+  "typecheck": { "enabled": true, "command": "python -m mypy .", "errorPattern": ": error:" },
+  "lint": { "enabled": true, "command": "python -m ruff check .", "format": "lines", "linePattern": "^[^ ]+:[0-9]+:[0-9]+:" },
+  "build": { "enabled": false },
+  "tests": { "enabled": true, "command": "python -m pytest -q", "format": "exit-code" },
+  "structure": {
+    "enabled": true,
+    "dependencyFile": "requirements.txt",
+    "dependencyType": "requirements",
+    "migrationsDir": "migrations",
+    "migrationExtensions": [".sql", ".py"],
+    "alertKeywords": ["security definer", "create policy", "drop policy", "grant ", "drop table", "drop column"]
+  },
+  "quick": {
+    "sourcePattern": "^.*[.]py$",
+    "lintCommand": "python -m ruff check {files}",
+    "testsCommand": "python -m pytest -q"
+  }
+}
