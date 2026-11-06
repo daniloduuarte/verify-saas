@@ -41,6 +41,16 @@ Tudo que é específico do projeto (comandos, pastas, palavras de alerta, etapas
 
 Código de saída: 0 = nada piorou; 1 = algo piorou ou algo já estava quebrado (tipos, build ou testes).
 
+## Primeiro uso: adaptar ao projeto (para o agente que está lendo isto)
+
+Se o usuário acabou de instalar a skill e pediu para adaptá-la ao SaaS dele, faça nesta ordem:
+
+1. **Leia o projeto** (`package.json` ou equivalente, pastas de migrations, como os testes rodam) e ajuste `verify-saas.config.json`: comandos de tipos, lint, build e testes, `structure.migrationsDir` e `alertKeywords`. Desligue (`"enabled": false`) o que o projeto não tem.
+2. **Pergunte o que o negócio não pode deixar quebrar** (agenda sem horário duplicado, estoque sem ficar negativo, saldo que bate, empresa A sem ver a B, pagamento recebido duas vezes creditando uma vez...). Não invente regras: confirme com o usuário e escreva testes para elas, usando `docs/exemplos-por-nicho.md` como modelo.
+3. **Confirme o ambiente de testes.** Nunca rode testes contra produção. Se não houver banco ou ambiente de teste, pare e avise o usuário.
+4. **Só então** rode `node .claude/skills/verify-saas/driver.mjs --baseline` e mostre o relatório, apontando o que já estava quebrado (dívida) e o que passou.
+5. Diga ao usuário o que foi ajustado e que ele deve revisar os testes escritos.
+
 ## Como ler o relatório
 
 Em ordem:

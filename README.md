@@ -90,6 +90,28 @@ Edite o arquivo para os comandos do seu projeto (veja a seção 6 e a pasta `exa
 
 Se instalou em `~/.claude/skills`, rode o driver apontando para esse caminho; o driver sempre trabalha na pasta onde você o executa.
 
+### Passo importante: peça ao seu agente de IA para adaptar a skill ao seu SaaS
+
+A skill vem com padrões de Next.js, mas **o seu SaaS é diferente**. Depois de instalar, peça ao agente de IA que você usa (**Claude Code, Codex, Cursor ou outro**) para ajustar tudo ao seu projeto. Cole algo assim:
+
+```
+Instalei a skill verify-saas neste projeto. Leia o projeto e adapte-a ao meu SaaS:
+1. Ajuste o verify-saas.config.json aos comandos reais do meu projeto
+   (tipos, lint, build e testes) e à pasta das migrations.
+2. Me pergunte o que o meu negócio não pode deixar quebrar e escreva
+   testes para essas regras (veja docs/exemplos-por-nicho.md).
+3. Ajuste a lista alertKeywords ao vocabulário de permissões do meu banco.
+4. Rode o driver com --baseline e me mostre o relatório.
+Regra: nunca rode os testes contra o banco de produção. Se não houver
+ambiente de teste, pare e me avise.
+```
+
+O que o agente vai fazer: trocar os comandos pelos do seu projeto, **escrever os testes das regras do seu nicho** (agenda sem horário duplicado, estoque que não fica negativo, saldo que bate, empresa A que não vê a B...) e só então gravar o primeiro baseline. Revise o que ele escreveu: é você quem conhece as regras do seu negócio.
+
+### Com Codex ou outro agente que não usa "skills"
+
+O driver é um script comum, então funciona com qualquer agente. Se o seu agente não reconhece a pasta `.claude/skills`, peça para ele ler `verify-saas/SKILL.md` e seguir como instrução, ou cole a regra "quando rodar" no arquivo de instruções do projeto (por exemplo, o `AGENTS.md`).
+
 ### Sem o Claude (só Node)
 
 O driver é um arquivo só. Na raiz do seu projeto:
@@ -210,6 +232,7 @@ Criado por Danilo Duarte com Claude Code.
 - Modes: full (before commit, push and deploy), `--quick` (type check plus lint and tests of changed files only, never touches the baseline), and `--baseline` (recapture the current state as the reference).
 - Everything project-specific lives in `verify-saas.config.json`: commands, folders, alert keywords, and each step can be turned off. Defaults target Next.js + TypeScript + npm; see `examples/` for Next.js + Supabase and Python + pytest.
 - Install: copy `verify-saas/` into `.claude/skills/` (project) or `~/.claude/skills/` (all projects), copy the config to your project root, run `node .claude/skills/verify-saas/driver.mjs --baseline` once, and commit the baseline.
+- After installing, ask your AI agent (Claude Code, Codex, Cursor or whatever you use) to adapt the config and write tests for your business rules; a ready-to-paste prompt is in the install section. For agents without "skills", point them at `verify-saas/SKILL.md` or paste its rules into your project instructions (for example `AGENTS.md`).
 - Exit code is 0 when nothing regressed and 1 otherwise.
 - It is not a security guarantee; it only tells you something broke or changed. Protection comes from the tests you write (see `docs/exemplos-por-nicho.md`, in Portuguese). **Never run tests against a production database.**
 
