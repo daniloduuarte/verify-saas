@@ -66,9 +66,24 @@ Atenção: ao final do modo completo o baseline é **sobrescrito** com o estado 
 
 ## 3. Instalação
 
-### Com o Claude Code
+### Instalação rápida (recomendada): cole no seu agente de IA
 
-Copie a pasta `verify-saas/` deste repositório para dentro do seu projeto:
+Você não precisa baixar nem copiar nada. Abra o seu agente de IA (**Claude Code, Codex ou outro**) **dentro da pasta do seu projeto** e cole este pedido:
+
+```
+Instale a skill verify-saas neste projeto, sem rodar nada ainda:
+1. Clone https://github.com/daniloduuarte/verify-saas numa pasta temporária (git clone --depth 1).
+2. Copie a pasta verify-saas/ do clone para .claude/skills/verify-saas deste projeto.
+3. Copie o arquivo verify-saas.config.json para a raiz do projeto. Se já existir um, não sobrescreva e me avise.
+4. Apague a pasta temporária.
+5. Me diga o que foi instalado e onde. Não rode o verificador nem os testes ainda.
+```
+
+Quando ele confirmar a instalação, siga para o **"Passo importante"** mais abaixo: um segundo pedido que adapta a skill e os testes ao seu SaaS.
+
+### Instalação manual (Claude Code)
+
+Se preferir fazer à mão, copie a pasta `verify-saas/` deste repositório para dentro do seu projeto:
 
 ```bash
 # só para este projeto
@@ -231,7 +246,8 @@ Criado por Danilo Duarte com Claude Code.
 
 - Modes: full (before commit, push and deploy), `--quick` (type check plus lint and tests of changed files only, never touches the baseline), and `--baseline` (recapture the current state as the reference).
 - Everything project-specific lives in `verify-saas.config.json`: commands, folders, alert keywords, and each step can be turned off. Defaults target Next.js + TypeScript + npm; see `examples/` for Next.js + Supabase and Python + pytest.
-- Install: copy `verify-saas/` into `.claude/skills/` (project) or `~/.claude/skills/` (all projects), copy the config to your project root, run `node .claude/skills/verify-saas/driver.mjs --baseline` once, and commit the baseline.
+- Quick install: open your AI agent inside your project and paste the install prompt from section 3 (it clones this repo, copies the skill and the config, and cleans up). No manual copying needed.
+- Manual install: copy `verify-saas/` into `.claude/skills/` (project) or `~/.claude/skills/` (all projects), copy the config to your project root, run `node .claude/skills/verify-saas/driver.mjs --baseline` once, and commit the baseline.
 - After installing, ask your AI agent (Claude Code, Codex, Cursor or whatever you use) to adapt the config and write tests for your business rules; a ready-to-paste prompt is in the install section. For agents without "skills", point them at `verify-saas/SKILL.md` or paste its rules into your project instructions (for example `AGENTS.md`).
 - Exit code is 0 when nothing regressed and 1 otherwise.
 - It is not a security guarantee; it only tells you something broke or changed. Protection comes from the tests you write (see `docs/exemplos-por-nicho.md`, in Portuguese). **Never run tests against a production database.**

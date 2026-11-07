@@ -17,6 +17,35 @@ import fs from "node:fs";
 import path from "node:path";
 
 const args = process.argv.slice(2);
+
+// ---------- ajuda e flags desconhecidas (antes de rodar qualquer coisa) ----------
+const HELP = `verify-saas: confere se uma mudança quebrou algo.
+
+Uso (rode na RAIZ do seu projeto):
+  node .claude/skills/verify-saas/driver.mjs [--baseline | --quick] [--config caminho.json]
+
+  (sem flag)  completo: tipos, lint, build, testes e estrutura; compara com o baseline e o atualiza
+  --quick     rápido: tipos + lint e testes só dos arquivos alterados; não toca no baseline
+  --baseline  captura o estado atual como o "bom" (primeiro uso)
+  --config    usa outro arquivo de configuração (padrão: verify-saas.config.json)
+  --help, -h  mostra esta ajuda e NÃO roda nada
+
+Documentação: https://github.com/daniloduuarte/verify-saas`;
+if (args.includes("--help") || args.includes("-h")) {
+  console.log(HELP);
+  process.exit(0);
+}
+const KNOWN_FLAGS = ["--baseline", "--quick", "--config"];
+const configValueIndex = args.indexOf("--config") + 1;
+const unknown = args.filter(
+  (a, i) => a.startsWith("-") && !KNOWN_FLAGS.includes(a) && !(i === configValueIndex && configValueIndex > 0),
+);
+if (unknown.length > 0) {
+  console.error(`Opção desconhecida: ${unknown.join(", ")}\n`);
+  console.error(HELP);
+  process.exit(2);
+}
+
 const forceBaseline = args.includes("--baseline");
 const quickMode = args.includes("--quick");
 const cfgFlag = args.indexOf("--config");
