@@ -1,0 +1,8 @@
+{
+  "name": "verify-saas",
+  "private": true,
+  "description": "Testes da skill verify-saas (sem dependências): npm test",
+  "scripts": {
+    "test": "node --test"
+  }
+}

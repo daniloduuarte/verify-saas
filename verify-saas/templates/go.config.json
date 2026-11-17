@@ -1,0 +1,20 @@
+{
+  "baselinePath": "verify-saas.baseline.json",
+  "typecheck": { "enabled": true, "command": "go vet ./...", "errorPattern": "[.]go:[0-9]+:[0-9]+:" },
+  "lint": { "enabled": false, "command": "golangci-lint run", "format": "lines", "linePattern": "^[^ ]+[.]go:[0-9]+:[0-9]+:" },
+  "build": { "enabled": true, "command": "go build ./...", "clean": [], "routePattern": "" },
+  "tests": { "enabled": true, "command": "go test ./...", "format": "exit-code" },
+  "structure": {
+    "enabled": true,
+    "dependencyFile": "go.mod",
+    "dependencyType": "go-mod",
+    "migrationsDir": "migrations",
+    "migrationExtensions": [".sql"],
+    "alertKeywords": ["security definer", "create policy", "drop policy", "grant ", "drop table", "drop column"]
+  },
+  "quick": {
+    "sourcePattern": "^.*[.]go$",
+    "lintCommand": "",
+    "testsCommand": "go test ./..."
+  }
+}

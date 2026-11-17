@@ -2,430 +2,459 @@
 // verify-saas: verificação de regressão + detecção de mudança estrutural.
 // Node puro, sem dependências. Tudo que é específico do projeto (comandos,
 // pastas, palavras de alerta) vem do arquivo verify-saas.config.json.
+// Rode SEMPRE na raiz do projeto: a pasta atual (process.cwd()) é o projeto.
 //
-// Uso (rode na RAIZ do seu projeto):
-//   node .claude/skills/verify-saas/driver.mjs [--baseline | --quick] [--config caminho.json]
-//
-//   (sem flag)  modo completo: roda as 5 etapas, compara com o baseline salvo,
-//               imprime o relatório e ATUALIZA o baseline.
-//   --quick     modo rápido: tipos do projeto + lint e testes só dos arquivos
-//               alterados (git). Sem build, sem estrutura, NÃO toca no baseline.
-//   --baseline  ignora o baseline antigo e captura o estado atual como "bom".
+// SEGURANÇA: o config executa comandos arbitrários, como os scripts do
+// package.json. Não rode em repositório que você não confia.
 
-import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { DEFAULTS, loadConfig } from "./lib/config.mjs";
+import { redact, runCommand } from "./lib/exec.mjs";
+import { changedFiles } from "./lib/git.mjs";
+import { compare } from "./lib/compare.mjs";
+import { countTypeErrors, parseGoMod, parseLint, parseRequirements, parseTests } from "./lib/parse.mjs";
+import { buildInitConfig, detectPackageManager, looksMissing, noTestsFound, readPackageJson, skipReason, translateTokens } from "./lib/project.mjs";
+import { tokenize } from "./lib/exec.mjs";
 
+const here = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 
-// ---------- ajuda e flags desconhecidas (antes de rodar qualquer coisa) ----------
 const HELP = `verify-saas: confere se uma mudança quebrou algo.
 
 Uso (rode na RAIZ do seu projeto):
-  node .claude/skills/verify-saas/driver.mjs [--baseline | --quick] [--config caminho.json]
+  node .claude/skills/verify-saas/driver.mjs [opções]
 
-  (sem flag)  completo: tipos, lint, build, testes e estrutura; compara com o baseline e o atualiza
-  --quick     rápido: tipos + lint e testes só dos arquivos alterados; não toca no baseline
-  --baseline  captura o estado atual como o "bom" (primeiro uso)
-  --config    usa outro arquivo de configuração (padrão: verify-saas.config.json)
-  --help, -h  mostra esta ajuda e NÃO roda nada
+  (sem opção)         completo: tipos, lint, build, testes e estrutura; compara com o baseline
+  --init              cria o verify-saas.config.json certo para o projeto (detecta Next, Node, Python, Go)
+  --quick             rápido: tipos + lint e testes só dos arquivos alterados (git); não toca no baseline
+  --baseline          captura o estado atual como o "bom" (primeiro uso), ignorando o baseline antigo
+  --update-baseline   grava o baseline mesmo com regressão (aceitar de propósito)
+  --json              imprime um resultado em JSON no stdout (o texto vai para o stderr)
+  --config ARQUIVO    usa outro arquivo de configuração (padrão: verify-saas.config.json)
+  --template NOME     com --init: nextjs, node, python ou go
+  --force             com --init: sobrescreve uma config existente
+  --help, -h          mostra esta ajuda e NÃO roda nada
 
+Códigos de saída: 0 = ok; 1 = regressão ou etapa quebrada; 2 = uso/config errados ou nada foi verificado.
+AVISO: o config executa comandos do seu projeto. Não rode em repositório não confiável.
 Documentação: https://github.com/daniloduuarte/verify-saas`;
+
 if (args.includes("--help") || args.includes("-h")) {
   console.log(HELP);
   process.exit(0);
 }
-const KNOWN_FLAGS = ["--baseline", "--quick", "--config"];
-const configValueIndex = args.indexOf("--config") + 1;
-const unknown = args.filter(
-  (a, i) => a.startsWith("-") && !KNOWN_FLAGS.includes(a) && !(i === configValueIndex && configValueIndex > 0),
-);
-if (unknown.length > 0) {
-  console.error(`Opção desconhecida: ${unknown.join(", ")}\n`);
-  console.error(HELP);
+
+// ---------- argumentos ----------
+const FLAGS = new Set(["--baseline", "--update-baseline", "--quick", "--json", "--init", "--force"]);
+const VALUE_FLAGS = new Set(["--config", "--template"]);
+const opts = { values: {} };
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (FLAGS.has(a)) opts[a.slice(2)] = true;
+  else if (VALUE_FLAGS.has(a)) {
+    if (!args[i + 1] || args[i + 1].startsWith("-")) {
+      console.error(`A opção ${a} precisa de um valor.\n`);
+      process.exit(2);
+    }
+    opts.values[a.slice(2)] = args[++i];
+  } else {
+    console.error(`Opção desconhecida: ${a}\n\n${HELP}`);
+    process.exit(2);
+  }
+}
+if (opts.quick && (opts.baseline || opts["update-baseline"] || opts.init)) {
+  console.error("--quick não combina com --baseline, --update-baseline nem --init (o rápido nunca toca no baseline).");
   process.exit(2);
 }
 
-const forceBaseline = args.includes("--baseline");
-const quickMode = args.includes("--quick");
-const cfgFlag = args.indexOf("--config");
 const projectRoot = process.cwd();
-
-// ---------- configuração ----------
-const DEFAULTS = {
-  baselinePath: "verify-saas.baseline.json",
-  typecheck: {
-    enabled: true,
-    command: "npx tsc --noEmit",
-    errorPattern: "error TS\\d+:",
-  },
-  lint: {
-    enabled: true,
-    command: "npx eslint . --format json",
-    // "eslint-json" (impressão digital arquivo:linha:coluna:regra),
-    // "lines" (cada linha de saída é uma impressão digital) ou "exit-code"
-    format: "eslint-json",
-    linePattern: "",
-  },
-  build: {
-    enabled: true,
-    command: "npm run build",
-    clean: [".next"],
-    // opcional: regex com 1 grupo de captura para listar rotas. Vazio = não lista.
-    routePattern: "^[│├└─\\s]*[├└]\\s*[○ƒ]\\s+(\\/\\S*)",
-  },
-  tests: {
-    enabled: true,
-    command: "npx vitest run --reporter=json",
-    // "vitest-json" / "jest-json" (conta testes) ou "exit-code" (só passou/falhou)
-    format: "vitest-json",
-  },
-  structure: {
-    enabled: true,
-    dependencyFile: "package.json",
-    dependencyType: "package-json", // ou "requirements" (requirements.txt)
-    migrationsDir: "supabase/migrations",
-    migrationExtensions: [".sql"],
-    alertKeywords: [
-      "security definer",
-      "create policy",
-      "drop policy",
-      "grant execute",
-      "enable row level security",
-      "service_role",
-    ],
-  },
-  quick: {
-    // só arquivos que casam com esta regex entram no modo rápido
-    sourcePattern: "^(app|lib|components|src|hooks)/.*\\.(ts|tsx)$",
-    // {files} vira a lista de arquivos alterados, entre aspas. Vazio = pula.
-    lintCommand: "npx eslint {files} --format json",
-    testsCommand: "npx vitest related --run {files}",
-  },
-};
-
-function merge(base, extra) {
-  if (Array.isArray(base) || typeof base !== "object" || base === null) return extra ?? base;
-  const out = { ...base };
-  for (const k of Object.keys(extra ?? {})) {
-    out[k] = k in base ? merge(base[k], extra[k]) : extra[k];
-  }
-  return out;
-}
-
-const cfgPath = path.resolve(projectRoot, cfgFlag >= 0 ? args[cfgFlag + 1] : "verify-saas.config.json");
-let userCfg = {};
-if (fs.existsSync(cfgPath)) {
-  try {
-    userCfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-  } catch (e) {
-    console.error(`Não consegui ler ${cfgPath}: ${e.message}`);
-    process.exit(1);
-  }
-} else if (cfgFlag >= 0) {
-  console.error(`Config não encontrada: ${cfgPath}`);
-  process.exit(1);
-}
-const cfg = merge(DEFAULTS, userCfg);
-const baselinePath = path.resolve(projectRoot, cfg.baselinePath);
-
-// ---------- utilitários ----------
-function run(cmd, opts = {}) {
-  try {
-    const output = execSync(cmd, {
-      cwd: projectRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      maxBuffer: 1024 * 1024 * 64,
-      ...opts,
-    });
-    return { ok: true, output };
-  } catch (err) {
-    return { ok: false, output: (err.stdout ?? "") + (err.stderr ?? "") };
-  }
-}
-
+const jsonMode = Boolean(opts.json);
+const out = (s = "") => (jsonMode ? console.error : console.log)(redact(s));
 const rel = (p) => path.relative(projectRoot, p).replace(/\\/g, "/");
-const readBaseline = () => (fs.existsSync(baselinePath) ? JSON.parse(fs.readFileSync(baselinePath, "utf8")) : null);
+const cfgFlag = opts.values.config;
+const cfgPath = path.resolve(projectRoot, cfgFlag ?? "verify-saas.config.json");
 
-function countTypeErrors(res) {
-  const re = new RegExp(cfg.typecheck.errorPattern);
-  const lines = res.output.split("\n").filter((l) => re.test(l));
-  // comando falhou mas nenhuma linha casou com o padrão: conta como 1 erro
-  return { ok: res.ok, lines, count: res.ok ? 0 : Math.max(lines.length, 1) };
+function finish(code, report) {
+  if (jsonMode) console.log(JSON.stringify({ exitCode: code, ...report }, null, 2));
+  process.exit(code);
 }
 
-// devolve { errors, warnings, fingerprints, readable, details }
-function parseLint(res) {
-  const fmt = cfg.lint.format;
-  if (fmt === "eslint-json") {
-    const out = { errors: 0, warnings: 0, fingerprints: [], details: {}, readable: true };
-    try {
-      for (const file of JSON.parse(res.output || "[]")) {
-        const r = rel(file.filePath);
-        for (const m of file.messages) {
-          const fp = `${r}:${m.line}:${m.column}:${m.ruleId ?? "?"}`;
-          if (m.severity === 2) out.errors++;
-          if (m.severity === 1) out.warnings++;
-          out.fingerprints.push(fp);
-          out.details[fp] = { severity: m.severity, message: m.message };
-        }
-      }
-    } catch {
-      out.readable = false;
-    }
-    return out;
+// ---------- --init ----------
+if (opts.init) {
+  if (fs.existsSync(cfgPath) && !opts.force) {
+    console.error(`Já existe ${rel(cfgPath)}. Não sobrescrevi. Use --init --force para recriar.`);
+    process.exit(2);
   }
-  if (fmt === "lines") {
-    const re = cfg.lint.linePattern ? new RegExp(cfg.lint.linePattern) : null;
-    const fps = res.output.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && (!re || re.test(l)));
-    return { errors: fps.length, warnings: 0, fingerprints: fps, details: {}, readable: true };
+  const { kind, config, notes } = buildInitConfig(projectRoot, path.join(here, "templates"), opts.values.template);
+  if (!config) {
+    console.error(notes.join("\n"));
+    process.exit(2);
   }
-  // exit-code
-  return { errors: res.ok ? 0 : 1, warnings: 0, fingerprints: res.ok ? [] : ["(lint falhou)"], details: {}, readable: true };
+  fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2) + "\n");
+  out(`Criei ${rel(cfgPath)} para um projeto "${kind}".`);
+  for (const n of notes) out(`  aviso: ${n}`);
+  out("Revise o arquivo (os comandos rodam no seu computador) e depois rode:");
+  out("  node .claude/skills/verify-saas/driver.mjs --baseline");
+  process.exit(0);
 }
 
-function parseTests(res) {
-  if (cfg.tests.format === "exit-code") {
-    return { ok: res.ok, total: 0, passed: 0, failed: res.ok ? 0 : 1, json: null, readable: true };
-  }
+// ---------- configuração e projeto ----------
+const loaded = loadConfig(cfgPath, cfgFlag !== undefined);
+if (loaded.error) {
+  console.error(loaded.error);
+  process.exit(2);
+}
+const cfg = loaded.cfg;
+const baselinePath = path.resolve(projectRoot, cfg.baselinePath);
+const pkg = readPackageJson(projectRoot);
+const pm = cfg.packageManager === "auto" ? detectPackageManager(projectRoot, pkg) : cfg.packageManager;
+const translate = (tokens) => translateTokens(tokens, pm);
+const maxBytes = Math.max(1, Number(cfg.maxOutputMB) || DEFAULTS.maxOutputMB) * 1024 * 1024;
+
+if (pkg && !fs.existsSync(path.join(projectRoot, "node_modules")) && /(^|\s)(npx|npm|pnpm|yarn|bun)\b/.test(JSON.stringify(cfg))) {
+  console.error("Este projeto tem package.json mas não tem a pasta node_modules.\nInstale as dependências primeiro (npm install, pnpm install, yarn ou bun install) e rode de novo.");
+  process.exit(2);
+}
+
+function readBaseline() {
+  if (!fs.existsSync(baselinePath)) return null;
   try {
-    const j = JSON.parse(res.output || "{}");
-    return {
-      ok: j.success === true,
-      total: j.numTotalTests ?? 0,
-      passed: j.numPassedTests ?? 0,
-      failed: j.numFailedTests ?? 0,
-      json: j,
-      readable: true,
-    };
-  } catch {
-    return { ok: res.ok, total: 0, passed: 0, failed: res.ok ? 0 : 1, json: null, readable: false };
+    return JSON.parse(fs.readFileSync(baselinePath, "utf8"));
+  } catch (e) {
+    out(`Aviso: não consegui ler o baseline (${e.message}). Ele será tratado como inexistente.`);
+    return null;
   }
 }
 
-function printTestFailures(t, res) {
-  if (!t.json) {
-    console.log(res.output.slice(-3000));
-    return;
+// Para o comando: [skipReason] ou resultado de execução.
+function precheck(command) {
+  let tk;
+  try {
+    tk = tokenize(command);
+  } catch (e) {
+    return e.message;
   }
-  for (const file of t.json.testResults ?? []) {
-    const failed = (file.assertionResults ?? []).filter((x) => x.status === "failed");
-    if (failed.length === 0 && file.status === "failed") {
-      console.log(`  ✗ suíte ${String(file.name).split(/[\\/]/).slice(-2).join("/")} não rodou: ${String(file.message ?? "").slice(0, 300)}`);
-    }
-    for (const x of failed) {
-      console.log(`  ✗ ${x.fullName}: ${String((x.failureMessages ?? [])[0] ?? "").replace(/\s+/g, " ").slice(0, 300)}`);
-    }
-  }
+  if (tk.shell) return null;
+  return skipReason(translate(tk.tokens), projectRoot, pkg);
 }
 
-const quoteFiles = (files) => files.map((f) => `"${f}"`).join(" ");
+async function execute(command, stepCfg, files = []) {
+  const seconds = Number(stepCfg.timeoutSeconds ?? cfg.timeoutSeconds) || DEFAULTS.timeoutSeconds;
+  const res = await runCommand({ command, cwd: projectRoot, files, timeoutMs: seconds * 1000, maxBytes, translate });
+  res.limit = seconds;
+  return res;
+}
+
+function failNote(res) {
+  if (res.timedOut) return `passou do limite de ${res.limit}s (aumente timeoutSeconds na config se for normal)`;
+  if (res.error && !res.missing) return `não consegui rodar: ${res.error}`;
+  if (res.truncated) return "a saída passou do limite (maxOutputMB) e foi cortada";
+  return "";
+}
+
+const skippedList = [];
+const brokenList = [];
+const report = { mode: opts.quick ? "quick" : "full", steps: {} };
 
 // ---------- modo rápido ----------
-if (quickMode) {
-  const listed = [run("git diff --name-only HEAD").output, run("git ls-files --others --exclude-standard").output].join("\n");
+if (opts.quick) {
+  const { git, files: all } = changedFiles(projectRoot);
   const pat = new RegExp(cfg.quick.sourcePattern);
-  const changed = [...new Set(listed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean))].filter(
-    (f) => pat.test(f) && fs.existsSync(path.join(projectRoot, f)),
-  );
-  console.log(`== rápido — ${changed.length} arquivo(s) de código alterado(s) ==`);
+  const changed = all.filter((f) => pat.test(f));
+  if (!git) out("Aviso: esta pasta não é um repositório git; não sei quais arquivos mudaram. O modo rápido vai rodar só os tipos.");
+  out(`== rapido: ${changed.length} arquivo(s) de código alterado(s) ==`);
+  let ran = 0;
   let allOk = true;
+  report.changedFiles = changed;
 
   if (cfg.typecheck.enabled) {
-    const t = countTypeErrors(run(cfg.typecheck.command));
-    console.log(t.ok ? "  tipos: ok" : `  tipos: ${t.count} erro(s)\n${t.lines.slice(0, 20).join("\n")}`);
-    allOk &&= t.ok;
+    const why = precheck(cfg.typecheck.command);
+    if (why) {
+      out(`  tipos: PULADO (${why})`);
+      skippedList.push(`tipos: ${why}`);
+      report.steps.typecheck = { status: "skipped", reason: why };
+    } else {
+      const res = await execute(cfg.typecheck.command, cfg.typecheck);
+      const miss = looksMissing(res);
+      if (miss) {
+        out(`  tipos: PULADO (${miss})`);
+        skippedList.push(`tipos: ${miss}`);
+        report.steps.typecheck = { status: "skipped", reason: miss };
+      } else {
+        ran++;
+        const t = countTypeErrors(cfg, res);
+        out(t.ok ? "  tipos: ok" : `  tipos: ${t.count} erro(s) ${failNote(res)}\n${t.lines.slice(0, 20).join("\n")}`);
+        report.steps.typecheck = { status: t.ok ? "ok" : "failed", errorCount: t.count };
+        allOk &&= t.ok;
+      }
+    }
   }
 
-  if (cfg.lint.enabled && cfg.quick.lintCommand && changed.length > 0) {
-    const res = run(cfg.quick.lintCommand.replace("{files}", quoteFiles(changed)));
-    const lint = parseLint(res);
-    const base = readBaseline();
-    const known = new Set(base?.lint?.fingerprints ?? []);
-    let fresh = lint.fingerprints
-      .filter((fp) => !known.has(fp) && (cfg.lint.format !== "eslint-json" || lint.details[fp]?.severity === 2))
-      .map((fp) => `${fp}  ${lint.details[fp]?.message ?? ""}`.trim());
-    if (!lint.readable) fresh = ["(não consegui ler a saída do lint)"];
-    console.log(fresh.length === 0 ? "  lint (alterados): ok" : `  lint (alterados): ${fresh.length} erro(s) novo(s)\n    ${fresh.join("\n    ")}`);
-    allOk &&= fresh.length === 0;
+  const base = readBaseline();
+  if (git && cfg.lint.enabled && cfg.quick.lintCommand && changed.length > 0) {
+    const why = precheck(cfg.quick.lintCommand);
+    const res = why ? null : await execute(cfg.quick.lintCommand, cfg.lint, changed);
+    const miss = why ?? (res ? looksMissing(res) : null);
+    if (miss) {
+      out(`  lint (alterados): PULADO (${miss})`);
+      skippedList.push(`lint: ${miss}`);
+      report.steps.lint = { status: "skipped", reason: miss };
+    } else {
+      ran++;
+      const lint = parseLint(cfg, res, projectRoot);
+      if (!lint.readable) {
+        out(`  lint (alterados): FALHOU, não consegui ler a saída. ${failNote(res)}\n${res.output.slice(-1500)}`);
+        report.steps.lint = { status: "failed", reason: "saída ilegível" };
+        allOk = false;
+      } else {
+        const known = new Set(base?.lint?.fingerprints ?? []);
+        const fresh = lint.fingerprints
+          .filter((fp) => !known.has(fp) && (cfg.lint.format !== "eslint-json" || lint.details[fp]?.severity === 2))
+          .map((fp) => `${fp}  ${lint.details[fp]?.message ?? ""}`.trim());
+        out(fresh.length === 0 ? "  lint (alterados): ok" : `  lint (alterados): ${fresh.length} erro(s) novo(s)\n    ${fresh.join("\n    ")}`);
+        if (!base) out("  (sem baseline: todo erro de lint nos arquivos alterados conta como novo)");
+        report.steps.lint = { status: fresh.length === 0 ? "ok" : "failed", newProblems: fresh };
+        allOk &&= fresh.length === 0;
+      }
+    }
   }
 
-  if (cfg.tests.enabled && cfg.quick.testsCommand && changed.length > 0) {
-    const res = run(cfg.quick.testsCommand.replace("{files}", quoteFiles(changed)));
-    console.log(`  testes ligados: ${res.ok ? "ok" : "FALHOU"}`);
-    if (!res.ok) console.log(res.output.slice(-2500));
-    allOk &&= res.ok;
+  if (git && cfg.tests.enabled && cfg.quick.testsCommand && changed.length > 0) {
+    const why = precheck(cfg.quick.testsCommand);
+    const res = why ? null : await execute(cfg.quick.testsCommand, cfg.tests, changed);
+    const miss = why ?? (res ? looksMissing(res) : null) ?? (res && noTestsFound(res, cfg.quick.testsCommand) ? "nenhum teste ligado a esses arquivos" : null);
+    if (miss) {
+      out(`  testes ligados: PULADO (${miss})`);
+      skippedList.push(`testes: ${miss}`);
+      report.steps.tests = { status: "skipped", reason: miss };
+    } else {
+      ran++;
+      out(`  testes ligados: ${res.ok ? "ok" : "FALHOU " + failNote(res)}`);
+      if (!res.ok) out(res.output.slice(-2500));
+      report.steps.tests = { status: res.ok ? "ok" : "failed" };
+      allOk &&= res.ok;
+    }
   }
 
-  console.log("\nModo rápido: sem build e sem baseline. Rode o completo antes de commit/push.");
-  process.exit(allOk ? 0 : 1);
+  out("\nModo rápido: sem build e sem baseline. Rode o completo antes de commit/push.");
+  if (skippedList.length > 0) out(`Etapas puladas (NÃO verificadas): ${skippedList.join("; ")}`);
+  if (ran === 0) {
+    out("RESULTADO: nada foi verificado (todas as etapas foram puladas ou estão desligadas).");
+    finish(2, { ok: false, ...report, skipped: skippedList });
+  }
+  out(allOk ? "RESULTADO: APROVADO no que foi verificado." : "RESULTADO: REPROVADO. Corrija os itens acima.");
+  finish(allOk ? 0 : 1, { ok: allOk, ...report, skipped: skippedList });
 }
 
 // ---------- modo completo ----------
 const TOTAL = 5;
-
-console.log(`== 1/${TOTAL} — tipos (${cfg.typecheck.command}) ==`);
-let tsc = { ok: true, lines: [], count: 0 };
-if (cfg.typecheck.enabled) {
-  tsc = countTypeErrors(run(cfg.typecheck.command));
-  console.log(tsc.ok ? "  ok, zero erros" : `  ${tsc.count} erro(s)`);
-  if (!tsc.ok) console.log(tsc.lines.slice(0, 20).join("\n"));
-} else console.log("  desligado na config");
-
-console.log(`== 2/${TOTAL} — lint ==`);
-let lint = { errors: 0, warnings: 0, fingerprints: [], details: {}, readable: true };
-if (cfg.lint.enabled) {
-  lint = parseLint(run(cfg.lint.command));
-  if (!lint.readable) console.log("  (não consegui ler a saída do lint; veja a config lint.format)");
-  console.log(`  ${lint.errors} erro(s), ${lint.warnings} warning(s)`);
-} else console.log("  desligado na config");
-
-console.log(`== 3/${TOTAL} — build (${cfg.build.command}) ==`);
-let build = { ok: true, output: "" };
-let routes = [];
-if (cfg.build.enabled) {
-  for (const dir of cfg.build.clean ?? []) fs.rmSync(path.join(projectRoot, dir), { recursive: true, force: true });
-  build = run(cfg.build.command);
-  if (cfg.build.routePattern) {
-    const re = new RegExp(cfg.build.routePattern);
-    routes = build.output.split("\n").map((l) => l.match(re)).filter(Boolean).map((m) => m[1]);
-  }
-  console.log(build.ok ? `  ok${cfg.build.routePattern ? `, ${routes.length} rota(s)` : ""}` : "  FALHOU — ver saída abaixo");
-  if (!build.ok) console.log(build.output.slice(-3000));
-} else console.log("  desligado na config");
-
-console.log(`== 4/${TOTAL} — testes (${cfg.tests.command}) ==`);
-let tests = { ok: true, total: 0, passed: 0, failed: 0 };
-if (cfg.tests.enabled) {
-  const res = run(cfg.tests.command);
-  tests = parseTests(res);
-  if (!tests.readable) console.log("  (não consegui ler a saída em JSON; usando só o código de saída)");
-  console.log(tests.ok ? `  ok${tests.total ? `, ${tests.passed}/${tests.total} passou` : ""}` : `  ${tests.failed} falha(s)${tests.total ? ` de ${tests.total}` : ""}`);
-  if (!tests.ok) printTestFailures(tests, res);
-} else console.log("  desligado na config");
-
-console.log(`== 5/${TOTAL} — estrutura: dependências e migrations ==`);
-let deps = {};
-let migrations = [];
-const sc = cfg.structure;
-const migrationsDir = path.join(projectRoot, sc.migrationsDir);
-function scanKeywords(file) {
-  const content = fs.readFileSync(path.join(migrationsDir, file), "utf8").toLowerCase();
-  return sc.alertKeywords.filter((kw) => content.includes(kw.toLowerCase()));
-}
-if (sc.enabled) {
-  const depFile = path.join(projectRoot, sc.dependencyFile);
-  if (fs.existsSync(depFile)) {
-    const raw = fs.readFileSync(depFile, "utf8");
-    if (sc.dependencyType === "requirements") {
-      for (const line of raw.split(/\r?\n/)) {
-        const m = line.trim().match(/^([A-Za-z0-9_.\-]+)\s*(.*)$/);
-        if (m && !line.trim().startsWith("#")) deps[m[1]] = m[2] || "*";
-      }
-    } else {
-      const pkg = JSON.parse(raw);
-      deps = { ...pkg.dependencies, ...pkg.devDependencies };
-    }
-  }
-  if (fs.existsSync(migrationsDir)) {
-    migrations = fs
-      .readdirSync(migrationsDir)
-      .filter((f) => sc.migrationExtensions.some((e) => f.endsWith(e)))
-      .sort();
-  }
-  console.log(`  ${Object.keys(deps).length} dependência(s), ${migrations.length} migration(s)`);
-} else console.log("  desligado na config");
-
 const current = {
+  version: 2,
   capturedAt: new Date().toISOString(),
-  tsc: { ok: tsc.ok, errorCount: tsc.count },
-  lint: { errorCount: lint.errors, warningCount: lint.warnings, fingerprints: lint.fingerprints },
-  build: { ok: build.ok, routes },
-  tests: { ok: tests.ok, total: tests.total, passed: tests.passed, failed: tests.failed },
-  dependencies: deps,
-  migrations,
+  tsc: { ok: true, errorCount: 0, skipped: true },
+  lint: { errorCount: 0, warningCount: 0, fingerprints: [], skipped: true },
+  build: { ok: true, routes: [], skipped: true },
+  tests: { ok: true, total: 0, passed: 0, failed: 0, skipped: true },
+  dependencies: {},
+  migrations: [],
+};
+let ranCount = 0;
+const skip = (key, label, reason) => {
+  out(`  PULADO: ${reason}`);
+  skippedList.push(`${label}: ${reason}`);
+  report.steps[key] = { status: "skipped", reason };
 };
 
-const baseline = !forceBaseline ? readBaseline() : null;
-
-console.log("\n========== RELATÓRIO ==========");
-let hadRegression = false;
-
-if (!baseline) {
-  console.log("(sem baseline anterior: esta rodada VIRA o baseline; a próxima já compara contra ela)");
+out(`== 1/${TOTAL} tipos${cfg.typecheck.enabled ? ` (${cfg.typecheck.command})` : ""} ==`);
+if (!cfg.typecheck.enabled) {
+  out("  desligado na config");
+  report.steps.typecheck = { status: "disabled" };
 } else {
-  if (current.tsc.ok && !baseline.tsc.ok) console.log("✓ Tipos: os erros anteriores foram corrigidos.");
-  else if (!current.tsc.ok && baseline.tsc.ok) {
-    console.log("✗ REGRESSÃO — os tipos estavam limpos e agora têm erro(s).");
-    hadRegression = true;
-  } else if (current.tsc.errorCount > baseline.tsc.errorCount) {
-    console.log(`✗ REGRESSÃO — tipos tinham ${baseline.tsc.errorCount} erro(s), agora têm ${current.tsc.errorCount}.`);
-    hadRegression = true;
-  }
-
-  // lint: por impressão digital, não por contagem
-  const baseSet = new Set(baseline.lint.fingerprints ?? []);
-  const curSet = new Set(lint.fingerprints);
-  const newIssues = lint.fingerprints.filter((f) => !baseSet.has(f));
-  const fixed = (baseline.lint.fingerprints ?? []).filter((f) => !curSet.has(f));
-  if (newIssues.length > 0) {
-    console.log(`✗ NOVO(S) PROBLEMA(S) DE LINT (${newIssues.length}), não existiam antes:`);
-    for (const f of newIssues) console.log(`    ${f}`);
-    hadRegression = true;
-  }
-  if (fixed.length > 0) console.log(`✓ ${fixed.length} problema(s) de lint corrigido(s) desde a última rodada.`);
-  if (newIssues.length === 0 && fixed.length === 0) {
-    console.log(`= Lint sem mudança (${lint.errors} erro(s) / ${lint.warnings} warning(s) antigos, dívida anterior).`);
-  }
-
-  if (current.build.ok && !baseline.build.ok) console.log("✓ Build: estava quebrado, agora funciona.");
-  else if (!current.build.ok && baseline.build.ok) {
-    console.log("✗ REGRESSÃO — o build estava ok e agora falha.");
-    hadRegression = true;
-  }
-
-  if (baseline.tests) {
-    if (current.tests.ok && !baseline.tests.ok) console.log("✓ Testes: estavam falhando, agora todos passam.");
-    else if (!current.tests.ok && baseline.tests.ok) {
-      console.log(`✗ REGRESSÃO — os testes estavam ok e agora ${current.tests.failed} falha(m).`);
-      hadRegression = true;
-    } else if (!current.tests.ok && current.tests.failed > baseline.tests.failed) {
-      console.log(`✗ REGRESSÃO — testes tinham ${baseline.tests.failed} falha(s), agora têm ${current.tests.failed}.`);
-      hadRegression = true;
+  const why = precheck(cfg.typecheck.command);
+  const res = why ? null : await execute(cfg.typecheck.command, cfg.typecheck);
+  const miss = why ?? (res ? looksMissing(res) : null);
+  if (miss) skip("typecheck", "tipos", miss);
+  else {
+    ranCount++;
+    const t = countTypeErrors(cfg, res);
+    current.tsc = { ok: t.ok, errorCount: t.count };
+    out(t.ok ? "  ok, zero erros" : `  ${t.count} erro(s) ${failNote(res)}`);
+    if (!t.ok) {
+      out(t.lines.slice(0, 20).join("\n"));
+      brokenList.push("tipos com erro");
     }
+    report.steps.typecheck = { status: t.ok ? "ok" : "failed", errorCount: t.count };
   }
+}
 
-  const baseRoutes = new Set(baseline.build.routes ?? []);
-  const curRoutes = new Set(routes);
-  const added = routes.filter((r) => !baseRoutes.has(r));
-  const removed = (baseline.build.routes ?? []).filter((r) => !curRoutes.has(r));
-  if (added.length > 0) console.log(`ℹ Rota(s) nova(s): ${added.join(", ")}`);
-  if (removed.length > 0) console.log(`⚠ Rota(s) que sumiram: ${removed.join(", ")}. Confirme se foi intencional.`);
-
-  const baseDeps = baseline.dependencies ?? {};
-  const addedDeps = Object.keys(deps).filter((d) => !(d in baseDeps));
-  const removedDeps = Object.keys(baseDeps).filter((d) => !(d in deps));
-  if (addedDeps.length > 0) console.log(`ℹ Dependência(s) nova(s): ${addedDeps.join(", ")}`);
-  if (removedDeps.length > 0) console.log(`⚠ Dependência(s) removida(s): ${removedDeps.join(", ")}`);
-  for (const d of Object.keys(deps).filter((d) => d in baseDeps && baseDeps[d] !== deps[d])) {
-    console.log(`ℹ Versão mudou: ${d} (${baseDeps[d]} → ${deps[d]})`);
-  }
-
-  const baseMig = new Set(baseline.migrations ?? []);
-  const newMig = migrations.filter((m) => !baseMig.has(m));
-  if (newMig.length > 0) {
-    console.log("ℹ Migration(s) nova(s) desde a última verificação:");
-    for (const m of newMig) {
-      const hits = scanKeywords(m);
-      console.log(hits.length > 0 ? `    ${m}  ⚠ palavras de alerta (${hits.join(", ")}): revise antes de aplicar em produção` : `    ${m}`);
+out(`== 2/${TOTAL} lint ==`);
+let lint = { errors: 0, warnings: 0, fingerprints: [] };
+if (!cfg.lint.enabled) {
+  out("  desligado na config");
+  report.steps.lint = { status: "disabled" };
+} else {
+  const why = precheck(cfg.lint.command);
+  const res = why ? null : await execute(cfg.lint.command, cfg.lint);
+  const miss = why ?? (res ? looksMissing(res) : null);
+  if (miss) skip("lint", "lint", miss);
+  else {
+    ranCount++;
+    lint = parseLint(cfg, res, projectRoot);
+    if (!lint.readable) {
+      out(`  FALHOU: não consegui ler a saída do lint (a ferramenta pode ter quebrado). ${failNote(res)}`);
+      out(`  Confira lint.format e o comando na config. Fim da saída:\n${res.output.slice(-800)}`);
+      brokenList.push("lint ilegível");
+      report.steps.lint = { status: "failed", reason: "saída ilegível" };
+    } else {
+      current.lint = { errorCount: lint.errors, warningCount: lint.warnings, fingerprints: lint.fingerprints.map(redact) };
+      out(`  ${lint.errors} erro(s), ${lint.warnings} warning(s)`);
+      report.steps.lint = { status: "ok", errors: lint.errors, warnings: lint.warnings };
     }
   }
 }
 
-console.log("================================\n");
+out(`== 3/${TOTAL} build${cfg.build.enabled ? ` (${cfg.build.command})` : ""} ==`);
+if (!cfg.build.enabled) {
+  out("  desligado na config");
+  report.steps.build = { status: "disabled" };
+} else {
+  const why = precheck(cfg.build.command);
+  if (why) skip("build", "build", why);
+  else {
+    for (const dir of cfg.build.clean ?? []) {
+      const target = path.resolve(projectRoot, dir);
+      // só apaga DENTRO do projeto, nunca a própria raiz nem fora dela
+      if (target !== projectRoot && target.startsWith(projectRoot + path.sep)) fs.rmSync(target, { recursive: true, force: true });
+      else out(`  aviso: build.clean ignorou "${dir}" (fora da pasta do projeto)`);
+    }
+    const res = await execute(cfg.build.command, cfg.build);
+    const miss = looksMissing(res);
+    if (miss) skip("build", "build", miss);
+    else {
+      ranCount++;
+      let routes = [];
+      if (cfg.build.routePattern) {
+        const re = new RegExp(cfg.build.routePattern);
+        routes = res.output.split(/\r?\n/).map((l) => l.match(re)).filter(Boolean).map((m) => m[1]);
+      }
+      current.build = { ok: res.ok, routes };
+      out(res.ok ? `  ok${cfg.build.routePattern ? `, ${routes.length} rota(s)` : ""}` : `  FALHOU ${failNote(res)}\n${res.output.slice(-3000)}`);
+      if (!res.ok) brokenList.push("build falhou");
+      report.steps.build = { status: res.ok ? "ok" : "failed", routes: routes.length };
+    }
+  }
+}
 
-fs.writeFileSync(baselinePath, JSON.stringify(current, null, 2));
-console.log(`Baseline atualizado em ${rel(baselinePath)}.`);
+out(`== 4/${TOTAL} testes${cfg.tests.enabled ? ` (${cfg.tests.command})` : ""} ==`);
+if (!cfg.tests.enabled) {
+  out("  desligado na config");
+  report.steps.tests = { status: "disabled" };
+} else {
+  const why = precheck(cfg.tests.command);
+  const res = why ? null : await execute(cfg.tests.command, cfg.tests);
+  const miss = why ?? (res ? looksMissing(res) : null) ?? (res && noTestsFound(res, cfg.tests.command) ? "nenhum teste encontrado" : null);
+  if (miss) skip("tests", "testes", miss);
+  else {
+    ranCount++;
+    const t = parseTests(cfg, res);
+    if (!t.readable) out("  (não consegui ler a saída em JSON; usando só o código de saída)");
+    current.tests = { ok: t.ok, total: t.total, passed: t.passed, failed: t.failed };
+    out(t.ok ? `  ok${t.total ? `, ${t.passed}/${t.total} passou` : ""}` : `  ${t.failed} falha(s)${t.total ? ` de ${t.total}` : ""} ${failNote(res)}`);
+    if (!t.ok) {
+      if (t.json) {
+        for (const file of t.json.testResults ?? []) {
+          const failed = (file.assertionResults ?? []).filter((x) => x.status === "failed");
+          if (failed.length === 0 && file.status === "failed") out(`  X suíte ${String(file.name).split(/[\\/]/).slice(-2).join("/")} não rodou: ${String(file.message ?? "").slice(0, 300)}`);
+          for (const x of failed) out(`  X ${x.fullName}: ${String((x.failureMessages ?? [])[0] ?? "").replace(/\s+/g, " ").slice(0, 300)}`);
+        }
+      } else out(res.output.slice(-3000));
+      brokenList.push("testes falhando");
+    }
+    report.steps.tests = { status: t.ok ? "ok" : "failed", total: t.total, passed: t.passed, failed: t.failed };
+  }
+}
 
-process.exit(hadRegression || !current.build.ok || !current.tsc.ok || !current.tests.ok ? 1 : 0);
+out(`== 5/${TOTAL} estrutura: dependências e migrations ==`);
+const sc = cfg.structure;
+const migrationsDir = path.resolve(projectRoot, sc.migrationsDir);
+if (!sc.enabled) {
+  out("  desligado na config");
+  report.steps.structure = { status: "disabled" };
+} else {
+  try {
+    const depFile = path.resolve(projectRoot, sc.dependencyFile);
+    if (fs.existsSync(depFile)) {
+      const raw = fs.readFileSync(depFile, "utf8");
+      if (sc.dependencyType === "requirements") current.dependencies = parseRequirements(raw);
+      else if (sc.dependencyType === "go-mod") current.dependencies = parseGoMod(raw);
+      else {
+        const p = JSON.parse(raw);
+        current.dependencies = { ...p.dependencies, ...p.devDependencies };
+      }
+    }
+    if (fs.existsSync(migrationsDir)) {
+      current.migrations = fs.readdirSync(migrationsDir).filter((f) => sc.migrationExtensions.some((e) => f.endsWith(e))).sort();
+    }
+    out(`  ${Object.keys(current.dependencies).length} dependência(s), ${current.migrations.length} migration(s)`);
+    report.steps.structure = { status: "ok", dependencies: Object.keys(current.dependencies).length, migrations: current.migrations.length };
+  } catch (e) {
+    out(`  aviso: não consegui ler dependências/migrations (${e.message}). Etapa ignorada.`);
+    report.steps.structure = { status: "skipped", reason: e.message };
+  }
+}
+
+function scanKeywords(file) {
+  try {
+    const content = fs.readFileSync(path.join(migrationsDir, file), "utf8").toLowerCase();
+    return sc.alertKeywords.filter((kw) => content.includes(kw.toLowerCase()));
+  } catch {
+    return [];
+  }
+}
+
+// ---------- relatório ----------
+const oldBaseline = readBaseline();
+const baseline = opts.baseline ? null : oldBaseline;
+out("\n========== RELATORIO ==========");
+let regressions = [];
+if (!baseline) {
+  out("(sem baseline anterior: esta rodada vira o baseline; a próxima já compara contra ela)");
+} else {
+  const cmp = compare(baseline, current, scanKeywords);
+  regressions = cmp.regressions;
+  for (const l of cmp.lines) out(`[${l.tag}] ${l.text}`);
+  if (cmp.lines.length === 0) out("[igual] Nada mudou em relação ao baseline.");
+}
+out("================================\n");
+
+// ---------- baseline: nunca esconder regressão ----------
+const hadRegression = regressions.length > 0;
+let baselineAction;
+if (hadRegression && !opts["update-baseline"] && !opts.baseline) {
+  baselineAction = "mantido";
+  out("Baseline NÃO atualizado: houve regressão. Corrija e rode de novo.");
+  out("(Se aceita o estado atual de propósito, rode com --update-baseline.)");
+} else {
+  // etapa pulada nesta rodada preserva o que o baseline antigo sabia sobre ela
+  const toWrite = { ...current };
+  if (oldBaseline && !opts.baseline) {
+    for (const k of ["tsc", "lint", "build", "tests"]) if (current[k].skipped && oldBaseline[k] && !oldBaseline[k].skipped) toWrite[k] = oldBaseline[k];
+  }
+  fs.writeFileSync(baselinePath, JSON.stringify(toWrite, null, 2));
+  baselineAction = oldBaseline && !opts.baseline ? "atualizado" : "criado";
+  out(`Baseline ${baselineAction} em ${rel(baselinePath)}${hadRegression ? " (regressão aceita por --baseline/--update-baseline)" : ""}.`);
+}
+
+// ---------- veredito ----------
+if (skippedList.length > 0) out(`Etapas puladas (NÃO verificadas): ${skippedList.join("; ")}`);
+const summary = { ok: false, ...report, regressions, broken: brokenList, skipped: skippedList, baseline: baselineAction };
+if (ranCount === 0) {
+  out("RESULTADO: nada foi verificado (todas as etapas foram puladas ou estão desligadas). Revise o verify-saas.config.json.");
+  finish(2, summary);
+}
+const bad = hadRegression || brokenList.length > 0;
+out(bad ? `RESULTADO: REPROVADO (${regressions.length} regressão(ões); quebrado: ${brokenList.join(", ") || "nada"}).` : "RESULTADO: APROVADO no que foi verificado.");
+summary.ok = !bad;
+finish(bad ? 1 : 0, summary);
