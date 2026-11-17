@@ -77,6 +77,7 @@ test("tudo pulado: nada verificado, código 2", () => {
   const r = run(dir);
   assert.equal(r.code, 2, r.text);
   assert.match(r.text, /nada foi verificado/);
+  assert.ok(!fs.existsSync(path.join(dir, "verify-saas.baseline.json")), "sem etapa rodada, não grava baseline");
 });
 
 test("config ausente: mensagem clara e código 2", () => {

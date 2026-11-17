@@ -432,7 +432,10 @@ out("================================\n");
 // ---------- baseline: nunca esconder regressão ----------
 const hadRegression = regressions.length > 0;
 let baselineAction;
-if (hadRegression && !opts["update-baseline"] && !opts.baseline) {
+if (ranCount === 0) {
+  baselineAction = "não gravado";
+  out("Baseline não gravado: nenhuma etapa rodou.");
+} else if (hadRegression && !opts["update-baseline"] && !opts.baseline) {
   baselineAction = "mantido";
   out("Baseline NÃO atualizado: houve regressão. Corrija e rode de novo.");
   out("(Se aceita o estado atual de propósito, rode com --update-baseline.)");
