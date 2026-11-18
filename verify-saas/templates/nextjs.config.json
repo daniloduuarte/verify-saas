@@ -2,7 +2,7 @@
   "baselinePath": "verify-saas.baseline.json",
   "typecheck": {
     "enabled": true,
-    "command": "npx tsc --noEmit"
+    "command": "npx tsc --noEmit --incremental false"
   },
   "lint": {
     "enabled": true,

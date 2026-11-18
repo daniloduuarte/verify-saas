@@ -6,7 +6,7 @@ export const DEFAULTS = {
   packageManager: "auto", // auto | npm | pnpm | yarn | bun
   timeoutSeconds: 600, // limite por etapa (cada etapa pode ter o seu: "timeoutSeconds")
   maxOutputMB: 64, // saída máxima guardada por comando
-  typecheck: { enabled: true, command: "npx tsc --noEmit", errorPattern: "error TS[0-9]+:" },
+  typecheck: { enabled: true, command: "npx tsc --noEmit --incremental false", errorPattern: "error TS[0-9]+:" },
   lint: {
     enabled: true,
     command: "npx eslint . --format json",

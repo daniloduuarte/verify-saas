@@ -68,7 +68,7 @@ const REDACTIONS = [
   [/((?:secret|token|password|passwd|api[_-]?key|private[_-]?key|authorization)[A-Za-z0-9_]*["']?\s*[=:]\s*)(["']?)[^\s"',;]{4,}/gi, "$1$2[REDACTED]"],
 ];
 export function redact(text) {
-  let out = String(text ?? "");
+  let out = String(text ?? "").replace(/\[[0-9;?]*[A-Za-z]/g, ""); // tira cores ANSI (saída de build)
   for (const [re, rep] of REDACTIONS) out = out.replace(re, rep);
   return out;
 }

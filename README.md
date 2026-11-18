@@ -11,6 +11,23 @@ Feita para quem constrói um SaaS com ajuda de IA e não consegue ler cada linha
 
 ---
 
+> **Se você usa uma IA de código (Claude Code ou Codex), peça a ela: "siga o `INSTALAR-COM-IA.md` deste repositório".** Ela instala tudo sozinha e só pergunta o que não souber.
+
+## Cole na sua IA
+
+1. Abra o Claude Code ou o Codex **dentro da pasta do seu projeto**.
+2. Cole este texto:
+
+```
+Instale a skill de https://github.com/daniloduuarte/verify-saas no meu projeto. Siga o arquivo INSTALAR-COM-IA.md do repositório.
+```
+
+3. Responda às perguntas que ela fizer. No fim ela explica, em português simples, o que criou e o que você precisa fazer.
+
+O caminho manual (para quem prefere) está mais abaixo, a partir de "Instalação em 3 passos".
+
+---
+
 ## 1. O que é e qual problema resolve
 
 Quando a IA mexe no seu código, você não vê tudo o que mudou. Os comandos de sempre (`tsc`, `eslint`, `build`, `test`) ajudam, mas só dizem **"passou ou falhou agora"**. Eles não respondem:

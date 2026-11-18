@@ -452,7 +452,10 @@ if (ranCount === 0) {
 
 // ---------- veredito ----------
 if (skippedList.length > 0) out(`Etapas puladas (NÃO verificadas): ${skippedList.join("; ")}`);
-const summary = { ok: false, ...report, regressions, broken: brokenList, skipped: skippedList, baseline: baselineAction };
+const NOMES = { typecheck: "tipos", lint: "lint", build: "build", tests: "testes", structure: "estrutura" };
+const disabledList = Object.entries(report.steps).filter(([, v]) => v.status === "disabled").map(([k]) => NOMES[k] ?? k);
+if (disabledList.length > 0) out(`Etapas desligadas na config (NÃO verificadas): ${disabledList.join(", ")}. "Aprovado" vale só para o que rodou.`);
+const summary = { ok: false, ...report, disabled: disabledList, regressions, broken: brokenList, skipped: skippedList, baseline: baselineAction };
 if (ranCount === 0) {
   out("RESULTADO: nada foi verificado (todas as etapas foram puladas ou estão desligadas). Revise o verify-saas.config.json.");
   finish(2, summary);

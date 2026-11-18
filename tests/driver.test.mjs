@@ -216,3 +216,11 @@ test("opção desconhecida e --help não rodam nada", () => {
   assert.equal(h.code, 0);
   assert.ok(!fs.existsSync(path.join(dir, "verify-saas.baseline.json")));
 });
+
+test("etapa desligada na config é avisada como NÃO verificada", () => {
+  const dir = mkProject(undefined, { ...FAKE_CFG, lint: { enabled: false }, tests: { enabled: false } });
+  const r = run(dir);
+  assert.equal(r.code, 0, r.text);
+  assert.match(r.text, /Etapas desligadas na config \(NÃO verificadas\): lint, build, testes, estrutura/);
+  assert.deepEqual(json(dir).disabled, ["lint", "build", "testes", "estrutura"]);
+});

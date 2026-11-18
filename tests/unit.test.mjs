@@ -71,3 +71,7 @@ test("compare: etapa pulada não gera regressão nem melhoria", () => {
   const cur2 = { ...base, tsc: { ok: false, errorCount: 3 } };
   assert.equal(compare(base, cur2).regressions.length, 1);
 });
+
+test("redact tira cores ANSI da saída do build", () => {
+  assert.equal(redact("\u001b[31m\u001b[1mErro\u001b[22m\u001b[39m aqui"), "Erro aqui");
+});
